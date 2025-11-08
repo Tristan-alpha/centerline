@@ -6,8 +6,65 @@ from pathlib import Path
 
 import imageio.v2 as imageio
 import numpy as np
+from matplotlib.colors import LinearSegmentedColormap
 from scipy.ndimage import distance_transform_edt
 
+DEFAULT_MASK_DIR = Path("/root/vessel/annotation/labelsTr")
+DEFAULT_OUTPUT_DIR = Path("/root/vessel/centerline/output")
+
+_STENOSIS_COLORMAP = LinearSegmentedColormap.from_list(
+    "stenosis_rdylbu",
+    [
+        (0.0, "#b10026"),  # critical narrowing - saturated red
+        (0.3, "#f46d43"),  # severe narrowing - orange
+        (0.5, "#fee08b"),  # moderate - yellow
+        (0.75, "#66c2a5"),  # mild - aqua
+        (1.0, "#3288bd"),  # normal vessel - blue
+    ],
+)
+
+try:
+    # Register once so downstream scripts can reuse the same name.
+    from matplotlib import cm
+
+    register_cmap = getattr(cm, "register_cmap", None)
+    if callable(register_cmap):
+        register_cmap(name=_STENOSIS_COLORMAP.name, cmap=_STENOSIS_COLORMAP)
+except (ValueError, ImportError):
+    pass
+
+
+def _coerce_centerline_array(raw) -> np.ndarray:
+    arr = np.asarray(raw, dtype=int)
+    if arr.size == 0:
+        return np.empty((0, 2), dtype=int)
+    if arr.ndim == 1:
+        if arr.size % 2 != 0:
+            return np.empty((0, 2), dtype=int)
+        arr = arr.reshape(-1, 2)
+    if arr.ndim != 2 or arr.shape[1] != 2:
+        return np.empty((0, 2), dtype=int)
+    return arr
+
+
+def _collect_centerline_coords(centerline_data: dict) -> np.ndarray:
+    paths = centerline_data.get("paths")
+    coord_sets = []
+    if isinstance(paths, list):
+        for entry in paths:
+            if isinstance(entry, dict):
+                arr = _coerce_centerline_array(entry.get("path", []))
+            else:
+                arr = _coerce_centerline_array(entry)
+            if arr.size:
+                coord_sets.append(arr)
+    if not coord_sets:
+        arr = _coerce_centerline_array(centerline_data.get("path", []))
+        if arr.size:
+            coord_sets.append(arr)
+    if not coord_sets:
+        return np.empty((0, 2), dtype=int)
+    return np.vstack(coord_sets)
 
 def load_mask(mask_path: Path) -> np.ndarray:
     """Load a binary vessel mask as uint8 (1=vessel, 0=background)."""
@@ -48,41 +105,47 @@ def normalize_for_visualization(
     return (vis * 255).astype(np.uint8)
 
 
-def compute_radius_rate(
-    radii_along_centerline: np.ndarray,
-    centerline_coords: np.ndarray,
-) -> np.ndarray:
-    """Compute signed radius change rate along a discretised centerline."""
-    if radii_along_centerline.size <= 1:
-        return np.zeros_like(radii_along_centerline, dtype=np.float32)
+def get_max_radius(mask_path: Path, centerline_path: Path) -> float:
+    """Computes the maximum radius for a single case."""
+    mask = load_mask(mask_path)
+    with open(centerline_path, "r", encoding="utf-8") as f:
+        centerline_data = json.load(f)
 
-    diffs = np.diff(centerline_coords.astype(np.float64), axis=0)
-    step_lengths = np.linalg.norm(diffs, axis=1)
-    step_lengths[step_lengths == 0.0] = 1.0  # avoid division by zero for duplicate points
+    centerline_coords = _collect_centerline_coords(centerline_data)
+    if centerline_coords.size == 0:
+        return 0.0
 
-    dr = np.diff(radii_along_centerline.astype(np.float64))
+    height, width = mask.shape
+    in_bounds = (
+        (centerline_coords[:, 0] >= 0)
+        & (centerline_coords[:, 0] < height)
+        & (centerline_coords[:, 1] >= 0)
+        & (centerline_coords[:, 1] < width)
+    )
+    if not np.all(in_bounds):
+        centerline_coords = centerline_coords[in_bounds]
+        if centerline_coords.size == 0:
+            return 0.0
 
-    forward = np.zeros_like(radii_along_centerline, dtype=np.float64)
-    forward[:-1] = dr / step_lengths
-    forward[-1] = forward[-2] if forward.size > 1 else 0.0
+    vessel_mask = mask.astype(bool)
+    if not np.any(vessel_mask):
+        return 0.0
 
-    backward = np.zeros_like(radii_along_centerline, dtype=np.float64)
-    backward[1:] = dr / step_lengths
-    backward[0] = backward[1] if backward.size > 1 else 0.0
-
-    rate = 0.5 * (forward + backward)
-    # return rate.astype(np.float32)
-    return forward.astype(np.float32)
+    dist_to_wall = distance_transform_edt(vessel_mask)
+    radii_on_centerline = dist_to_wall[centerline_coords[:, 0], centerline_coords[:, 1]]
+    return float(radii_on_centerline.max(initial=0.0))
 
 
-def create_feature_maps(mask_path: Path, centerline_path: Path, output_dir: Path) -> None:
+def create_feature_maps(
+    mask_path: Path, centerline_path: Path, output_dir: Path, global_max_radius: float
+) -> None:
     """Generate three feature maps for a single case and save them to disk."""
     mask = load_mask(mask_path)
 
     with open(centerline_path, "r", encoding="utf-8") as f:
         centerline_data = json.load(f)
 
-    centerline_coords = np.asarray(centerline_data.get("path", []), dtype=int)
+    centerline_coords = _collect_centerline_coords(centerline_data)
     if centerline_coords.size == 0:
         print(f"[WARN] Centerline is empty for {centerline_path}. Skipping.")
         return
@@ -115,7 +178,7 @@ def create_feature_maps(mask_path: Path, centerline_path: Path, output_dir: Path
         vessel_distances = dist_to_centerline[vessel_mask]
         max_dist = float(vessel_distances.max(initial=0.0))
         if max_dist > 0.0:
-            normalized_distance[vessel_mask] = (vessel_distances / max_dist).astype(np.float32)
+            normalized_distance[vessel_mask] = 1.0 - (vessel_distances / max_dist).astype(np.float32)
         else:
             normalized_distance[vessel_mask] = 0.0
 
@@ -129,35 +192,28 @@ def create_feature_maps(mask_path: Path, centerline_path: Path, output_dir: Path
         row_idx, col_idx = nearest_indices
         radius_map[vessel_mask] = radius_seed[row_idx[vessel_mask], col_idx[vessel_mask]]
 
-# ----------------------------------------------
-
-    rate_on_centerline = compute_radius_rate(radii_on_centerline, centerline_coords)
-    rate_seed = np.zeros_like(mask, dtype=np.float32)
-    rate_seed[centerline_coords[:, 0], centerline_coords[:, 1]] = rate_on_centerline
-    rate_map = np.zeros_like(mask, dtype=np.float32)
-    if np.any(vessel_mask):
-        row_idx, col_idx = nearest_indices
-        rate_map[vessel_mask] = rate_seed[row_idx[vessel_mask], col_idx[vessel_mask]]
-
+    # Normalize radius map with global max radius
+    normalized_radius_map = radius_map / global_max_radius if global_max_radius > 0 else radius_map
 
     data_dir = output_dir / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     np.save(data_dir / "feature_normalized_distance.npy", normalized_distance)
-    np.save(data_dir / "feature_radius.npy", radius_map)
-    np.save(data_dir / "feature_radius_rate.npy", rate_map)
+    np.save(data_dir / "feature_radius.npy", normalized_radius_map)
 
     dist_vis = normalize_for_visualization(normalized_distance, vessel_mask)
-    radius_vis = normalize_for_visualization(radius_map, vessel_mask)
-    rate_vis = normalize_for_visualization(rate_map, vessel_mask, symmetric=True)
+    radius_vis = normalize_for_visualization(normalized_radius_map, vessel_mask)
 
     figure_dir = output_dir / "figures"
     figure_dir.mkdir(parents=True, exist_ok=True)
     imageio.imwrite(figure_dir / "feature_dist_transform.png", dist_vis)
     imageio.imwrite(figure_dir / "feature_radius_map.png", radius_vis)
-    imageio.imwrite(figure_dir / "feature_rate_map.png", rate_vis)
 
-    pseudo_color = np.stack([dist_vis, radius_vis, rate_vis], axis=-1)
-    pseudo_color[~vessel_mask] = 0
+    # Apply perceptual colormap so severe stenosis (low radius) appears in warm tones.
+    radius_norm = np.zeros_like(normalized_radius_map, dtype=np.float32)
+    radius_norm[vessel_mask] = np.clip(normalized_radius_map[vessel_mask], 0.0, 1.0)
+    stenosis_colors = (_STENOSIS_COLORMAP(radius_norm)[..., :3] * 255).astype(np.uint8)
+    stenosis_colors[~vessel_mask] = 0
+    pseudo_color = stenosis_colors
     imageio.imwrite(figure_dir / "feature_pseudo_color.png", pseudo_color)
 
     print(f"[INFO] Saved feature maps for {centerline_path.parent.name} -> {output_dir}")
@@ -189,12 +245,25 @@ def process_all_cases(mask_dir: Path, output_dir: Path) -> None:
         print(f"[WARN] No centerline.json files found in {output_dir}")
         return
 
+    # First pass: compute global max radius
+    max_radii = []
     for centerline_json in json_paths:
         mask_path = resolve_mask_path(mask_dir, centerline_json)
         if mask_path is None:
-            print(f"[WARN] Mask not found for {centerline_json}. Skipping.")
+            print(f"[WARN] Mask not found for {centerline_json}. Skipping radius calculation.")
             continue
-        create_feature_maps(mask_path, centerline_json, centerline_json.parent)
+        max_radii.append(get_max_radius(mask_path, centerline_json))
+    
+    global_max_radius = max(max_radii) if max_radii else 0.0
+    print(f"[INFO] Global max radius calculated: {global_max_radius}")
+
+    # Second pass: generate feature maps
+    for centerline_json in json_paths:
+        mask_path = resolve_mask_path(mask_dir, centerline_json)
+        if mask_path is None:
+            print(f"[WARN] Mask not found for {centerline_json}. Skipping feature generation.")
+            continue
+        create_feature_maps(mask_path, centerline_json, centerline_json.parent, global_max_radius)
 
 
 def main() -> None:
@@ -202,14 +271,14 @@ def main() -> None:
     parser.add_argument(
         "--mask-dir",
         type=Path,
-        default=Path("/root/vessel/centerline/centerline_original/labelsTr"),
-        help="Directory containing vessel mask PNGs.",
+        default=DEFAULT_MASK_DIR,
+        help=f"Directory containing vessel mask PNGs (default: {DEFAULT_MASK_DIR}).",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("/root/vessel/centerline/centerline_original/output"),
-        help="Directory containing centerline outputs.",
+        default=DEFAULT_OUTPUT_DIR,
+        help=f"Directory containing centerline outputs (default: {DEFAULT_OUTPUT_DIR}).",
     )
     parser.add_argument(
         "--case-id",
@@ -232,7 +301,9 @@ def main() -> None:
         if mask_path is None:
             print(f"[ERROR] Mask not found for case {case_stem}.")
             return
-        create_feature_maps(mask_path, centerline_json, centerline_json.parent)
+        # For a single case, the global max is just the case's max
+        max_radius = get_max_radius(mask_path, centerline_json)
+        create_feature_maps(mask_path, centerline_json, centerline_json.parent, max_radius)
     else:
         process_all_cases(mask_dir, output_dir)
 
