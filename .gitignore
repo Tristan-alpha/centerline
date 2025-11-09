@@ -1,0 +1,43 @@
+# Editor and OS artifacts
+.vscode/
+*.pyc
+__pycache__/
+.DS_Store
+
+# Ignore large annotation/data directories
+annotation/
+centerline/output/
+centerline/centerline_original/labelsTr/
+output/
+
+# Typical volumetric/image/data files
+*.nii
+*.nii.gz
+*.nrrd
+*.mha
+*.mhd
+*.raw
+*.hdr
+*.img
+*.npy
+*.npz
+*.pt
+*.pth
+*.h5
+*.ckpt
+*.sav
+*.mat
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.bmp
+*.png
+*.jpg
+*.jpeg
+*.tif
+*.tiff
+
+# MATLAB-generated artifacts
+*.asv
+*.p
