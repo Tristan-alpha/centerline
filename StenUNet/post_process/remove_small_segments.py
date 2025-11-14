@@ -46,7 +46,7 @@ def segments_filter_size(segment_pixel_counts, segment_images, threshold):
 def binary_remove_small_segments(binary_image,threshold):
     segment_pixel_counts, segment_images=segments_division(binary_image)
     out_counts, out_seg = segments_filter_size(segment_pixel_counts,segment_images, threshold)
-    out = np.zeros((512,512))
+    out = np.zeros_like(binary_image)
     for i in range(len(out_seg)):
         out=out+out_seg[i]
     

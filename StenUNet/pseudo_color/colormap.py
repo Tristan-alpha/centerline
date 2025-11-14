@@ -18,13 +18,26 @@ _STENOSIS_COLORMAP = LinearSegmentedColormap.from_list(
     ],
 )
 
-register_cmap = getattr(cm, "register_cmap", None)
-if callable(register_cmap):
+# Matplotlib 3.7+ exposes colormaps through matplotlib.colormaps, while earlier
+# releases rely on cm.register_cmap. Try the modern API first and fall back.
+try:  # pragma: no cover
+    from matplotlib import colormaps as _colormaps
+except ImportError:  # pragma: no cover
+    _colormaps = None
+
+if _colormaps is not None:
     try:
-        register_cmap(name=_STENOSIS_COLORMAP.name, cmap=_STENOSIS_COLORMAP)
+        _colormaps.register(_STENOSIS_COLORMAP, name=_STENOSIS_COLORMAP.name)
     except ValueError:
-        # Matplotlib raises if the colormap is registered multiple times during reloads.
         pass
+else:
+    register_cmap = getattr(cm, "register_cmap", None)
+    if callable(register_cmap):
+        try:
+            register_cmap(name=_STENOSIS_COLORMAP.name, cmap=_STENOSIS_COLORMAP)
+        except ValueError:
+            # Matplotlib raises if the colormap is registered multiple times during reloads.
+            pass
 
 
 def _prepare_scalar(scalar_field: Tensor, clamp: bool) -> Tensor:

@@ -1,5 +1,6 @@
 import argparse
 import os
+from pathlib import Path
 import torch
 
 from utils.util import *
@@ -27,18 +28,20 @@ if __name__ == "__main__":
 
     print('--------------preprocessing--------------')
 
-    preprocess_path = './dataset_test/preprocessed/'
-    mkdir(preprocess_path)
+    input_path = Path(args.i).expanduser()
+    preprocess_path = input_path.parent / "preprocessed"
+    mkdir(str(preprocess_path))
     
-    for file_name in os.listdir(args.i):
-        
-        img_array = image_to_array(os.path.join(args.i, file_name))
+    for file_path in input_path.iterdir():
+        if not file_path.is_file():
+            continue
+        img_array = image_to_array(str(file_path))
         pre_img = preprocess(img_array)
-        cv2.imwrite(os.path.join (preprocess_path, file_name), pre_img)
+        cv2.imwrite(str(preprocess_path / file_path.name), pre_img)
     print('--------------preprocessing done--------------')
     mkdir(args.o)
     print('--------------predicting--------------')
-    predict(list_of_lists_or_source_folder = preprocess_path, output_folder = args.o, model_training_output_dir = args.m, use_folds =[0], checkpoint_name=args.chk, num_processes_preprocessing=1, num_processes_segmentation_export=1,device = device)
+    predict(list_of_lists_or_source_folder = str(preprocess_path), output_folder = args.o, model_training_output_dir = args.m, use_folds =[0], checkpoint_name=args.chk, num_processes_preprocessing=1, num_processes_segmentation_export=1,device = device)
     print('--------------postprocessing--------------')
     mkdir(args.p)
     remove_small_segments(args.o, args.p, threshold = args.t)
