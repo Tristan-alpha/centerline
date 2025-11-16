@@ -5,7 +5,8 @@ __pycache__/
 .DS_Store
 
 # Ignore large annotation/data directories
-annotation/
+annotation/imagesTr/
+annotation/labelsTr/
 centerline/output/
 centerline/centerline_original/labelsTr/
 output/
