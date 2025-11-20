@@ -38,6 +38,21 @@ def gradient_magnitude(tensor: Tensor, squared: bool = False) -> Tensor:
     return squared_mag if squared else torch.sqrt(squared_mag + 1e-12)
 
 
+def _match_mask_shape(mask: Tensor, reference: Tensor) -> Tensor:
+    """Broadcast ``mask`` to match ``reference`` spatial & channel dims."""
+
+    if mask.shape == reference.shape:
+        return mask
+    if mask.ndim != reference.ndim:
+        raise ValueError("mask must have the same number of dimensions as reference.")
+    if mask.shape[0] != reference.shape[0]:
+        raise ValueError("Batch dimension mismatch between mask and reference.")
+    if mask.shape[1] == 1:
+        expand_shape = (-1, reference.shape[1], *reference.shape[2:])
+        return mask.expand(expand_shape)
+    raise ValueError("mask must either match reference shape or have a single channel.")
+
+
 class ScalarFieldLoss(nn.Module):
     """Composite loss for scalar field regression with mask-aware weighting."""
 
@@ -59,10 +74,8 @@ class ScalarFieldLoss(nn.Module):
     def forward(self, prediction: Tensor, target: Tensor, mask: Tensor) -> Tensor:
         if prediction.shape != target.shape:
             raise ValueError("prediction and target must have identical shapes.")
-        if mask.shape != prediction.shape:
-            raise ValueError("mask must match prediction shape.")
 
-        mask = mask.float()
+        mask = _match_mask_shape(mask.float(), prediction)
         outside = 1.0 - mask
         eps = 1e-6
 

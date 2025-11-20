@@ -4,11 +4,14 @@ import argparse
 import logging
 from pathlib import Path
 
+# from centerline.centerline_pipeline import distance, io, metrics, path, preprocess, visualization
 from . import distance, io, metrics, path, preprocess, visualization
 
-DEFAULT_MASK_DIR = Path("/root/vessel/annotation/labelsTr")
-DEFAULT_ANNOTATIONS = Path("/root/vessel/annotation/annotations.json")
-DEFAULT_OUTPUT_DIR = Path("/root/vessel/centerline/output")
+# Get the root directory (two levels up from this file)
+_ROOT_DIR = Path(__file__).resolve().parent.parent.parent
+DEFAULT_MASK_DIR = _ROOT_DIR / "annotation" / "labelsTr"
+DEFAULT_ANNOTATIONS = _ROOT_DIR / "annotation" / "annotations.json"
+DEFAULT_OUTPUT_DIR = _ROOT_DIR / "centerline" / "output"
 
 
 def process_case(

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Tuple
 
-import cv2
+import imageio.v2 as imageio
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -27,42 +27,75 @@ def list_mask_files(mask_dir: Path) -> List[Path]:
     return sorted(files)
 
 
-def save_scalar_field(array: np.ndarray, path: Path, fmt: str) -> None:
+def save_field(array: np.ndarray, path: Path, fmt: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    array = array.astype(np.float32)
     if fmt == "npy":
-        np.save(path, array.astype(np.float32))
-    elif fmt == "pt":
-        torch.save(torch.from_numpy(array.astype(np.float32)), path)
-    elif fmt == "png":
-        scaled = np.clip(array, 0.0, 1.0)
-        scaled = (scaled * 255.0).astype(np.uint8)
-        cv2.imwrite(str(path), scaled)
-    else:
-        raise ValueError(f"Unsupported format {fmt}.")
+        np.save(path, array)
+        return
+    if fmt == "pt":
+        torch.save(torch.from_numpy(array), path)
+        return
+    if fmt == "png":
+        clipped = np.clip(array, 0.0, 1.0)
+        if clipped.ndim == 2:
+            scaled = (clipped * 255.0).astype(np.uint8)
+        elif clipped.ndim == 3 and clipped.shape[2] == 3:
+            scaled = (clipped * 255.0).astype(np.uint8)
+            # imageio expects RGB, no conversion needed
+        else:
+            raise ValueError("PNG export expects either HxW or HxWx3 arrays.")
+        imageio.imwrite(str(path), scaled)
+        return
+    raise ValueError(f"Unsupported format {fmt}.")
 
 
 def save_color_map(tensor: torch.Tensor, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     array = tensor.permute(1, 2, 0).cpu().numpy()
     array = np.clip(array, 0.0, 1.0)
-    bgr = cv2.cvtColor((array * 255.0).astype(np.uint8), cv2.COLOR_RGB2BGR)
-    cv2.imwrite(str(path), bgr)
+    # imageio expects RGB, no conversion needed
+    rgb = (array * 255.0).astype(np.uint8)
+    imageio.imwrite(str(path), rgb)
+
+
+def _infer_channel_flags(total_in_channels: int) -> Tuple[bool, bool]:
+    combos: Dict[int, Tuple[bool, bool]] = {
+        1: (False, False),
+        2: (True, False),
+        3: (False, True),
+        4: (True, True),
+    }
+    if total_in_channels not in combos:
+        raise ValueError(f"Unsupported input channel count {total_in_channels} in checkpoint.")
+    return combos[total_in_channels]
 
 
 def run_inference(args: argparse.Namespace) -> None:
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
     checkpoint = torch.load(args.checkpoint, map_location=device)
+    state_dict = checkpoint.get("model_state_dict", checkpoint)
 
-    in_channels = 1 + int(args.include_distance) + (2 if args.include_coords else 0)
+    stem_weight = state_dict.get("stem.0.weight")
+    head_weight = state_dict.get("head.2.weight")
+    if stem_weight is None or head_weight is None:
+        raise RuntimeError("Checkpoint is missing stem/head weights needed to build the model.")
+    trained_in_channels = stem_weight.shape[1]
+    out_channels = head_weight.shape[0]
+
+    include_distance, include_coords = _infer_channel_flags(trained_in_channels)
+    ckpt_args = checkpoint.get("args", {})
+    base_channels = ckpt_args.get("base_channels", args.base_channels)
+    num_stages = ckpt_args.get("num_stages", args.num_stages)
+
     model = ResUNet(
-        in_channels=in_channels,
-        out_channels=1,
-        base_channels=args.base_channels,
-        num_stages=args.num_stages,
+        in_channels=trained_in_channels,
+        out_channels=out_channels,
+        base_channels=base_channels,
+        num_stages=num_stages,
         dimension=2,
     ).to(device)
 
-    state_dict = checkpoint.get("model_state_dict", checkpoint)
     model.load_state_dict(state_dict)
     model.eval()
 
@@ -75,34 +108,47 @@ def run_inference(args: argparse.Namespace) -> None:
     for path in tqdm(mask_files, desc="Inferring", unit="image"):
         array = load_image(path)
         mask = binarize_mask(array)
-        inputs = prepare_input_channels(mask, args.include_distance, args.include_coords)
+        inputs = prepare_input_channels(mask, include_distance, include_coords)
         inputs_tensor = torch.from_numpy(inputs)[None, ...].to(device)
+        mask_tensor = torch.from_numpy(mask[None, None, ...]).to(device=device, dtype=inputs_tensor.dtype)
 
         with torch.no_grad():
             prediction = model(inputs_tensor)
             if args.sigmoid:
                 prediction = prediction.sigmoid()
+            prediction = prediction * mask_tensor
         prediction_cpu = prediction.squeeze(0).detach().cpu()
-
-        scalar = prediction_cpu.numpy()[0]
         stem = path.stem
-        scalar_path = scalar_dir / f"{stem}.{args.output_format}"
-        save_scalar_field(scalar, scalar_path, args.output_format)
-
-        if args.save_color:
-            color = apply_colormap(prediction_cpu.unsqueeze(0)).squeeze(0)
-            save_color_map(color, color_dir / f"{stem}.png")
+        if out_channels == 1:
+            scalar = prediction_cpu.numpy()[0]
+            scalar_path = scalar_dir / f"{stem}.{args.output_format}"
+            save_field(scalar, scalar_path, args.output_format)
+            if args.save_color:
+                color = apply_colormap(prediction_cpu.unsqueeze(0)).squeeze(0)
+                save_color_map(color, color_dir / f"{stem}.png")
+        elif out_channels == 3:
+            rgb = prediction_cpu.clamp(0.0, 1.0).permute(1, 2, 0).numpy()
+            rgb_path = scalar_dir / f"{stem}.{args.output_format}"
+            save_field(rgb, rgb_path, args.output_format)
+            if args.save_color or args.output_format != "png":
+                save_field(rgb, color_dir / f"{stem}.png", "png")
+        else:
+            raise ValueError(f"Unsupported number of output channels: {out_channels}")
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Infer pseudo color scalar fields from binary masks.")
     parser.add_argument("--mask-dir", required=True, type=str, help="Directory with binary mask files.")
     parser.add_argument("--checkpoint", required=True, type=str, help="Path to trained model checkpoint.")
-    parser.add_argument("--output-dir", type=str, default="./pseudo_color_outputs", help="Directory to save outputs.")
-    parser.add_argument("--include-distance", action="store_true", help="Enable distance channel to mirror training.")
-    parser.add_argument("--include-coords", action="store_true", help="Enable coordinate channels to mirror training.")
-    parser.add_argument("--output-format", type=str, default="npy", choices=["npy", "pt", "png"], help="Scalar field format.")
-    parser.add_argument("--save-color", action="store_true", help="Export pseudo color PNG overlays.")
+    parser.add_argument("--output-dir", type=str, default="./StenUNet/pseudo_color/runs", help="Directory to save outputs.")
+    parser.add_argument(
+        "--output-format",
+        type=str,
+        default="npy",
+        choices=["npy", "pt", "png"],
+        help="Export format for raw network predictions.",
+    )
+    parser.add_argument("--save-color", action="store_true", help="Export pseudo color PNG overlays (scalar mode) or RGB predictions (RGB mode).")
     parser.add_argument("--sigmoid", action="store_true", help="Apply sigmoid to prediction before saving.")
     parser.add_argument("--device", type=str, default="", help="PyTorch device string.")
     parser.add_argument("--base-channels", type=int, default=32, help="Base channel count (must match training).")

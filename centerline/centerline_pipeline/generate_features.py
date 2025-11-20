@@ -9,8 +9,8 @@ import numpy as np
 from matplotlib.colors import LinearSegmentedColormap
 from scipy.ndimage import distance_transform_edt
 
-DEFAULT_MASK_DIR = Path("/root/vessel/annotation/labelsTr")
-DEFAULT_OUTPUT_DIR = Path("/root/vessel/centerline/output")
+DEFAULT_MASK_DIR = Path("annotation/labelsTr")
+DEFAULT_OUTPUT_DIR = Path("centerline/output")
 
 _STENOSIS_COLORMAP = LinearSegmentedColormap.from_list(
     "stenosis_rdylbu",
@@ -208,12 +208,32 @@ def create_feature_maps(
     imageio.imwrite(figure_dir / "feature_dist_transform.png", dist_vis)
     imageio.imwrite(figure_dir / "feature_radius_map.png", radius_vis)
 
-    # Apply perceptual colormap so severe stenosis (low radius) appears in warm tones.
-    radius_norm = np.zeros_like(normalized_radius_map, dtype=np.float32)
-    radius_norm[vessel_mask] = np.clip(normalized_radius_map[vessel_mask], 0.0, 1.0)
-    stenosis_colors = (_STENOSIS_COLORMAP(radius_norm)[..., :3] * 255).astype(np.uint8)
-    stenosis_colors[~vessel_mask] = 0
-    pseudo_color = stenosis_colors
+    # Create a "Glowing Tube" visualization:
+    # 1. Hue/Color is determined by the radius (Red=Narrow, Blue=Wide)
+    # 2. Brightness/Intensity is determined by the distance to centerline (Center=Bright, Wall=Dark)
+    
+    # Step 1: Generate base color from radius using the stenosis colormap
+    radius_norm = np.clip(normalized_radius_map, 0.0, 1.0)
+    # _STENOSIS_COLORMAP returns RGBA, we take RGB and scale to 0-255
+    base_rgb = (_STENOSIS_COLORMAP(radius_norm)[..., :3] * 255).astype(np.float32)
+
+    # Step 2: Generate intensity factor from distance
+    # normalized_distance is -1.0 (bg), 0.0 (wall) to 1.0 (center)
+    # We clip to [0, 1] so background and wall are dark, center is full brightness
+    intensity = np.clip(normalized_distance, 0.0, 1.0)
+    # Add a channel dimension to broadcast: (H, W) -> (H, W, 1)
+    intensity = intensity[..., np.newaxis]
+
+    # Step 3: Combine color and intensity
+    # The result is a 3D tube effect where color indicates stenosis severity
+    glowing_tube = base_rgb * intensity
+    
+    # Ensure background is strictly black (masking)
+    glowing_tube[~vessel_mask] = 0
+    
+    # Cast to uint8 for saving
+    pseudo_color = glowing_tube.astype(np.uint8)
+
     imageio.imwrite(figure_dir / "feature_pseudo_color.png", pseudo_color)
 
     print(f"[INFO] Saved feature maps for {centerline_path.parent.name} -> {output_dir}")

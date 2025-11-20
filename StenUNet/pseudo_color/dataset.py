@@ -50,13 +50,12 @@ def _signed_distance(mask: np.ndarray) -> np.ndarray:
     if mask.ndim != 2:
         raise ValueError("Signed distance calculation currently supports 2D masks only.")
     mask_uint8 = (mask > 0.5).astype(np.uint8)
-    foreground = cv2.distanceTransform(mask_uint8, cv2.DIST_L2, 5)
-    background = cv2.distanceTransform(1 - mask_uint8, cv2.DIST_L2, 5)
-    signed = foreground - background
-    max_abs = np.max(np.abs(signed))
-    if max_abs > 0.0:
-        signed /= max_abs
-    return signed.astype(np.float32)
+    # Only compute distance inside the vessel; background stays at zero.
+    distance = cv2.distanceTransform(mask_uint8, cv2.DIST_L2, 5)
+    max_val = float(distance.max())
+    if max_val > 0.0:
+        distance /= max_val
+    return distance.astype(np.float32)
 
 
 def _coordinate_channels(shape: Tuple[int, ...]) -> np.ndarray:

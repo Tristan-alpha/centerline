@@ -1,5 +1,6 @@
 import json
 import os
+from pathlib import Path
 from typing import List, Sequence
 
 import matplotlib.pyplot as plt
@@ -252,7 +253,9 @@ class ImageAnnotator:
 
 
 def main():
-    image_directory = "annotation/labelsTr"
+    # Use absolute path based on this script's location
+    script_dir = Path(__file__).resolve().parent
+    image_directory = str(script_dir / "labelsTr")
     annotator = ImageAnnotator(image_directory)
     plt.show()
 

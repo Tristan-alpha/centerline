@@ -1,4 +1,4 @@
-"""Train a residual U-Net to regress scalar pseudo color fields from masks."""
+"""Train a residual U-Net to regress pseudo color fields from masks."""
 
 from __future__ import annotations
 
@@ -11,7 +11,8 @@ from typing import Dict, Optional
 import numpy as np
 import torch
 from torch import Tensor
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import autocast
+from torch.cuda.amp import GradScaler
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader
@@ -30,10 +31,29 @@ def set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
+def _match_mask_shape(mask: Tensor, reference: Tensor) -> Tensor:
+    if mask.shape == reference.shape:
+        return mask
+    if mask.ndim != reference.ndim:
+        raise ValueError("Mask must share the same dimensionality as the reference tensor.")
+    if mask.shape[0] != reference.shape[0]:
+        raise ValueError("Batch dimension mismatch between mask and tensor.")
+    if mask.shape[1] == 1:
+        expand_shape = (-1, reference.shape[1], *reference.shape[2:])
+        return mask.expand(expand_shape)
+    raise ValueError("Mask must either match reference shape or provide a singleton channel.")
+
+
+def apply_vessel_mask(tensor: Tensor, mask: Tensor) -> Tensor:
+    mask_aligned = _match_mask_shape(mask, tensor)
+    return tensor * mask_aligned
+
+
 def compute_mask_mae(prediction: Tensor, target: Tensor, mask: Tensor) -> float:
     eps = 1e-6
-    error = (prediction - target).abs() * mask
-    denom = mask.sum() + eps
+    mask_aligned = _match_mask_shape(mask, prediction)
+    error = (prediction - target).abs() * mask_aligned
+    denom = mask_aligned.sum() + eps
     return float(error.sum().item() / denom.item())
 
 
@@ -69,8 +89,8 @@ def train(args: argparse.Namespace) -> None:
     set_seed(args.seed)
 
     target_mode = args.target_mode.lower()
-    if target_mode != "scalar":
-        raise ValueError("This training script currently supports scalar targets only.")
+    if target_mode not in {"scalar", "rgb"}:
+        raise ValueError("target_mode must be 'scalar' or 'rgb'.")
 
     train_loader = build_dataloader(
         args.train_mask_dir,
@@ -99,9 +119,10 @@ def train(args: argparse.Namespace) -> None:
         val_loader = None
 
     in_channels = 1 + int(args.include_distance) + (2 if args.include_coords else 0)
+    out_channels = 3 if target_mode == "rgb" else 1
     model = ResUNet(
         in_channels=in_channels,
-        out_channels=1,
+        out_channels=out_channels,
         base_channels=args.base_channels,
         num_stages=args.num_stages,
         dimension=2,
@@ -140,8 +161,9 @@ def train(args: argparse.Namespace) -> None:
             mask = batch["mask"].to(device, non_blocking=True)
 
             optimizer.zero_grad(set_to_none=True)
-            with autocast(enabled=args.amp):
+            with autocast(device_type='cuda', enabled=args.amp):
                 prediction = model(inputs)
+                prediction = apply_vessel_mask(prediction, mask)
                 loss = loss_fn(prediction, target, mask)
 
             scaler.scale(loss).backward()
@@ -163,11 +185,13 @@ def train(args: argparse.Namespace) -> None:
             val_loss = 0.0
             mae_total = 0.0
             with torch.no_grad():
-                for batch in val_loader:
-                    inputs = batch["inputs"].to(device, non_blocking=True)
-                    target = batch["target"].to(device, non_blocking=True)
-                    mask = batch["mask"].to(device, non_blocking=True)
-                    prediction = model(inputs)
+                with autocast(device_type='cuda', enabled=args.amp):
+                    for batch in val_loader:
+                        inputs = batch["inputs"].to(device, non_blocking=True)
+                        target = batch["target"].to(device, non_blocking=True)
+                        mask = batch["mask"].to(device, non_blocking=True)
+                        prediction = model(inputs)
+                    prediction = apply_vessel_mask(prediction, mask)
                     loss = loss_fn(prediction, target, mask)
                     val_loss += loss.item()
                     mae_total += compute_mask_mae(prediction, target, mask)
@@ -195,13 +219,18 @@ def train(args: argparse.Namespace) -> None:
                 preview_inputs = preview_batch["inputs"].to(device)
                 with torch.no_grad():
                     preview_prediction = model(preview_inputs).cpu()
-                pseudo_color = apply_colormap(preview_prediction)
+                preview_mask = preview_batch["mask"]
+                masked_prediction = apply_vessel_mask(preview_prediction, preview_mask)
+                if target_mode == "rgb":
+                    pseudo_color = masked_prediction.clamp(0.0, 1.0)
+                else:
+                    pseudo_color = apply_colormap(masked_prediction)
                 for idx, meta in enumerate(preview_batch["meta"]):
                     stem = meta.get("stem", f"sample_{idx}")
                     path = preview_dir / f"{stem}.pt"
                     torch.save(
                         {
-                            "prediction": preview_prediction[idx],
+                            "prediction": masked_prediction[idx],
                             "pseudo_color": pseudo_color[idx],
                             "target": preview_batch["target"][idx],
                         },
@@ -229,11 +258,22 @@ def train(args: argparse.Namespace) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train pseudo-color regression baseline.")
-    parser.add_argument("--train-mask-dir", required=True, type=str, help="Directory with binary mask PNG/NPY files.")
-    parser.add_argument("--train-target-dir", required=True, type=str, help="Directory with scalar field supervision.")
-    parser.add_argument("--val-mask-dir", type=str, default="", help="Optional validation mask directory.")
-    parser.add_argument("--val-target-dir", type=str, default="", help="Optional validation target directory.")
-    parser.add_argument("--target-mode", type=str, default="scalar", help="Supervision mode (scalar only supported).")
+    parser.add_argument("--train-mask-dir", type=str, default="StenUNet/pseudo_color/train_data/masks_train", help="Directory with binary mask PNG/NPY files.")
+    parser.add_argument(
+        "--train-target-dir",
+        type=str,
+        default="StenUNet/pseudo_color/train_data/targets_train",
+        help="Directory with scalar or RGB pseudo color supervision.",
+    )
+    parser.add_argument("--val-mask-dir", type=str, default="StenUNet/pseudo_color/train_data/masks_val", help="Optional validation mask directory.")
+    parser.add_argument("--val-target-dir", type=str, default="StenUNet/pseudo_color/train_data/targets_val", help="Optional validation target directory.")
+    parser.add_argument(
+        "--target-mode",
+        type=str,
+        default="rgb",
+        choices=["scalar", "rgb"],
+        help="Supervision mode (scalar or full RGB pseudo color).",
+    )
     parser.add_argument("--include-distance", action="store_true", help="Append signed distance channel to the input.")
     parser.add_argument("--include-coords", action="store_true", help="Append coordinate channels to the input.")
     parser.add_argument("--batch-size", type=int, default=4, help="Training batch size.")
@@ -250,7 +290,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", type=str, default="", help="Torch device string, e.g. cuda:0 or cpu.")
     parser.add_argument("--base-channels", type=int, default=32, help="Base channel count for the ResUNet.")
     parser.add_argument("--num-stages", type=int, default=4, help="Number of encoder/decoder stages in ResUNet.")
-    parser.add_argument("--output-dir", type=str, default="./pseudo_color_runs", help="Directory to store checkpoints.")
+    parser.add_argument("--output-dir", type=str, default="./StenUNet/pseudo_color/runs", help="Directory to store checkpoints.")
     parser.add_argument("--metrics-file", type=str, default="", help="Optional JSONL file to append metrics.")
     parser.add_argument("--val-interval", type=int, default=1, help="Validate every N epochs.")
     parser.add_argument("--amp", action="store_true", help="Use automatic mixed precision.")
