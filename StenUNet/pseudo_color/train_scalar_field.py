@@ -18,7 +18,6 @@ from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from .colormap import apply_colormap
 from .dataset import PseudoColorDataset, collate_samples
 from .losses import ScalarFieldLoss
 from .model import ResUNet
@@ -60,7 +59,6 @@ def compute_mask_mae(prediction: Tensor, target: Tensor, mask: Tensor) -> float:
 def build_dataloader(
     mask_dir: str | Path,
     target_dir: str | Path,
-    target_mode: str,
     include_distance: bool,
     include_coords: bool,
     batch_size: int,
@@ -70,7 +68,7 @@ def build_dataloader(
     dataset = PseudoColorDataset(
         mask_dir=mask_dir,
         target_dir=target_dir,
-        target_mode=target_mode,
+        target_mode="hsv",
         include_distance=include_distance,
         include_coords=include_coords,
     )
@@ -87,15 +85,9 @@ def build_dataloader(
 def train(args: argparse.Namespace) -> None:
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
     set_seed(args.seed)
-
-    target_mode = args.target_mode.lower()
-    if target_mode not in {"scalar", "rgb"}:
-        raise ValueError("target_mode must be 'scalar' or 'rgb'.")
-
     train_loader = build_dataloader(
         args.train_mask_dir,
         args.train_target_dir,
-        target_mode,
         args.include_distance,
         args.include_coords,
         args.batch_size,
@@ -105,13 +97,12 @@ def train(args: argparse.Namespace) -> None:
 
     val_loader: Optional[DataLoader]
     if args.val_mask_dir and args.val_target_dir:
-        val_loader = build_dataloader(
-            args.val_mask_dir,
-            args.val_target_dir,
-            target_mode,
-            args.include_distance,
-            args.include_coords,
-            args.batch_size,
+            val_loader = build_dataloader(
+                args.val_mask_dir,
+                args.val_target_dir,
+                args.include_distance,
+                args.include_coords,
+                args.batch_size,
             shuffle=False,
             num_workers=args.num_workers,
         )
@@ -119,7 +110,7 @@ def train(args: argparse.Namespace) -> None:
         val_loader = None
 
     in_channels = 1 + int(args.include_distance) + (2 if args.include_coords else 0)
-    out_channels = 3 if target_mode == "rgb" else 1
+    out_channels = 3
     model = ResUNet(
         in_channels=in_channels,
         out_channels=out_channels,
@@ -191,10 +182,10 @@ def train(args: argparse.Namespace) -> None:
                         target = batch["target"].to(device, non_blocking=True)
                         mask = batch["mask"].to(device, non_blocking=True)
                         prediction = model(inputs)
-                    prediction = apply_vessel_mask(prediction, mask)
-                    loss = loss_fn(prediction, target, mask)
-                    val_loss += loss.item()
-                    mae_total += compute_mask_mae(prediction, target, mask)
+                        prediction = apply_vessel_mask(prediction, mask)
+                        loss = loss_fn(prediction, target, mask)
+                        val_loss += loss.item()
+                        mae_total += compute_mask_mae(prediction, target, mask)
             val_loss /= max(len(val_loader), 1)
             mae_total /= max(len(val_loader), 1)
             metrics["val_loss"] = val_loss
@@ -221,10 +212,7 @@ def train(args: argparse.Namespace) -> None:
                     preview_prediction = model(preview_inputs).cpu()
                 preview_mask = preview_batch["mask"]
                 masked_prediction = apply_vessel_mask(preview_prediction, preview_mask)
-                if target_mode == "rgb":
-                    pseudo_color = masked_prediction.clamp(0.0, 1.0)
-                else:
-                    pseudo_color = apply_colormap(masked_prediction)
+                pseudo_color = masked_prediction.clamp(0.0, 1.0)
                 for idx, meta in enumerate(preview_batch["meta"]):
                     stem = meta.get("stem", f"sample_{idx}")
                     path = preview_dir / f"{stem}.pt"
@@ -263,17 +251,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--train-target-dir",
         type=str,
         default="StenUNet/pseudo_color/train_data/targets_train",
-        help="Directory with scalar or RGB pseudo color supervision.",
+        help="Directory with HSV pseudo color supervision.",
     )
     parser.add_argument("--val-mask-dir", type=str, default="StenUNet/pseudo_color/train_data/masks_val", help="Optional validation mask directory.")
     parser.add_argument("--val-target-dir", type=str, default="StenUNet/pseudo_color/train_data/targets_val", help="Optional validation target directory.")
-    parser.add_argument(
-        "--target-mode",
-        type=str,
-        default="rgb",
-        choices=["scalar", "rgb"],
-        help="Supervision mode (scalar or full RGB pseudo color).",
-    )
     parser.add_argument("--include-distance", action="store_true", help="Append signed distance channel to the input.")
     parser.add_argument("--include-coords", action="store_true", help="Append coordinate channels to the input.")
     parser.add_argument("--batch-size", type=int, default=4, help="Training batch size.")

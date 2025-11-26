@@ -9,9 +9,9 @@ from typing import Dict, List, Tuple
 import imageio.v2 as imageio
 import numpy as np
 import torch
+from matplotlib.colors import hsv_to_rgb
 from tqdm import tqdm
 
-from .colormap import apply_colormap
 from .dataset import SUPPORTED_EXTS, binarize_mask, load_image, prepare_input_channels
 from .model import ResUNet
 
@@ -54,9 +54,19 @@ def save_color_map(tensor: torch.Tensor, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     array = tensor.permute(1, 2, 0).cpu().numpy()
     array = np.clip(array, 0.0, 1.0)
-    # imageio expects RGB, no conversion needed
     rgb = (array * 255.0).astype(np.uint8)
     imageio.imwrite(str(path), rgb)
+
+
+def export_stenunet_modality(hsv_array: np.ndarray, stem: str, args: argparse.Namespace) -> None:
+    images_dir = Path(args.stenunet_images_dir)
+    images_dir.mkdir(parents=True, exist_ok=True)
+    suffix = args.stenunet_file_ending
+    if not suffix.startswith("."):
+        suffix = "." + suffix
+    output_path = images_dir / f"{stem}_{args.stenunet_channel_index:04d}{suffix}"
+    hsv_uint8 = np.clip(hsv_array * 255.0, 0.0, 255.0).astype(np.uint8)
+    imageio.imwrite(str(output_path), hsv_uint8)
 
 
 def _infer_channel_flags(total_in_channels: int) -> Tuple[bool, bool]:
@@ -101,7 +111,7 @@ def run_inference(args: argparse.Namespace) -> None:
 
     mask_dir = Path(args.mask_dir)
     output_dir = Path(args.output_dir)
-    scalar_dir = output_dir / "scalar"
+    hsv_dir = output_dir / "hsv"
     color_dir = output_dir / "pseudo_color"
 
     mask_files = list_mask_files(mask_dir)
@@ -121,17 +131,20 @@ def run_inference(args: argparse.Namespace) -> None:
         stem = path.stem
         if out_channels == 1:
             scalar = prediction_cpu.numpy()[0]
-            scalar_path = scalar_dir / f"{stem}.{args.output_format}"
+            scalar_path = hsv_dir / f"{stem}.{args.output_format}"
             save_field(scalar, scalar_path, args.output_format)
             if args.save_color:
-                color = apply_colormap(prediction_cpu.unsqueeze(0)).squeeze(0)
-                save_color_map(color, color_dir / f"{stem}.png")
+                color = prediction_cpu.unsqueeze(0).repeat(1, 3, 1, 1)
+                save_color_map(color.squeeze(0), color_dir / f"{stem}.png")
         elif out_channels == 3:
-            rgb = prediction_cpu.clamp(0.0, 1.0).permute(1, 2, 0).numpy()
-            rgb_path = scalar_dir / f"{stem}.{args.output_format}"
-            save_field(rgb, rgb_path, args.output_format)
+            hsv = prediction_cpu.clamp(0.0, 1.0).permute(1, 2, 0).numpy()
+            hsv_path = hsv_dir / f"{stem}.{args.output_format}"
+            save_field(hsv, hsv_path, args.output_format)
+            rgb = hsv_to_rgb(hsv)
             if args.save_color or args.output_format != "png":
                 save_field(rgb, color_dir / f"{stem}.png", "png")
+            if args.stenunet_images_dir:
+                export_stenunet_modality(hsv, stem, args)
         else:
             raise ValueError(f"Unsupported number of output channels: {out_channels}")
 
@@ -153,6 +166,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", type=str, default="", help="PyTorch device string.")
     parser.add_argument("--base-channels", type=int, default=32, help="Base channel count (must match training).")
     parser.add_argument("--num-stages", type=int, default=4, help="Number of encoder/decoder stages (match training).")
+    parser.add_argument(
+        "--stenunet-images-dir",
+        type=str,
+        default="",
+        help=(
+            "Optional path to a StenUNet Raw_data images directory (e.g., nnNet_training/Raw_data/"
+            "Dataset_Train_val/imagesTr) where HSV representations will be exported as an extra modality."
+        ),
+    )
+    parser.add_argument(
+        "--stenunet-channel-index",
+        type=int,
+        default=2,
+        help="Channel index suffix used when exporting to StenUNet format (produces *_XXXX.png).",
+    )
+    parser.add_argument(
+        "--stenunet-file-ending",
+        type=str,
+        default=".png",
+        help="File extension when exporting HSV modality for StenUNet integration.",
+    )
     return parser
 
 

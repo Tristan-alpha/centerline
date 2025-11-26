@@ -101,13 +101,13 @@ def prepare_input_channels(
 
 
 class PseudoColorDataset(Dataset):
-    """Dataset that pairs binary masks with pseudo color supervision."""
+    """Dataset that pairs binary masks with HSV pseudo color supervision."""
 
     def __init__(
         self,
         mask_dir: str | Path,
         target_dir: str | Path,
-        target_mode: str = "scalar",
+        target_mode: str = "hsv",
         include_distance: bool = True,
         include_coords: bool = True,
         transform: Optional[Callable[[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]]] = None,
@@ -116,8 +116,8 @@ class PseudoColorDataset(Dataset):
         self.mask_dir = Path(mask_dir)
         self.target_dir = Path(target_dir)
         self.target_mode = target_mode
-        if target_mode not in {"scalar", "rgb"}:
-            raise ValueError(f"target_mode must be 'scalar' or 'rgb', got {target_mode}.")
+        if target_mode != "hsv":
+            raise ValueError(f"target_mode must be 'hsv', got {target_mode}.")
         self.include_distance = include_distance
         self.include_coords = include_coords
         self.transform = transform
@@ -138,15 +138,9 @@ class PseudoColorDataset(Dataset):
 
     def _load_target(self, stem: str) -> np.ndarray:
         target_path = _find_matching_file(stem, self.target_dir)
-        target = load_image(target_path)
-        if self.target_mode == "scalar":
-            if target.ndim == 3:
-                target = target[..., 0]
-            target = ensure_float(target)
-        else:
-            target = ensure_float(target)
-            if target.ndim == 2:
-                target = np.repeat(target[..., None], 3, axis=-1)
+        target = ensure_float(load_image(target_path))
+        if target.ndim == 2:
+            target = np.repeat(target[..., None], 3, axis=-1)
         return target
 
     def __getitem__(self, index: int) -> Dict[str, Any]:
@@ -156,11 +150,7 @@ class PseudoColorDataset(Dataset):
 
         inputs_array = prepare_input_channels(mask, self.include_distance, self.include_coords)
         target_array = self._load_target(stem)
-
-        if self.target_mode == "scalar":
-            target_tensor = torch.from_numpy(target_array.astype(np.float32))[None, ...]
-        else:
-            target_tensor = torch.from_numpy(target_array.astype(np.float32)).permute(2, 0, 1)
+        target_tensor = torch.from_numpy(target_array.astype(np.float32)).permute(2, 0, 1)
 
         sample: Dict[str, Any] = {
             "inputs": torch.from_numpy(inputs_array),

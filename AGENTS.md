@@ -6,6 +6,13 @@
 ## Build, Test, and Development Commands
 Create a Python environment, then install the primary dependencies with `python -m pip install -r StenUNet/requirements.txt`. Run StenUNet planning and training via `python training_planning.py` and `CUDA_VISIBLE_DEVICES=0 python training.py 0` executed from inside `StenUNet/`. Launch inference with `python inference.py -chk model_weights.ckpt -i dataset_test/raw`. The centerline workflow can be exercised end-to-end by invoking `python -m centerline_pipeline --mask-dir annotation/labelsTr --annotations annotation/annotations.json --out centerline/output --limit 1` after activating the same environment.
 
+### Current workflow (end-to-end)
+- 1️⃣ Generate centerlines: `python -m centerline_pipeline` (from repo root).
+- 2️⃣ Derive HSV vessel representations and copy paired masks/targets into `StenUNet/pseudo_color/train_data` in one step: `python centerline/centerline_pipeline/generate_features.py --mask-dir annotation/labelsTr --output-dir centerline/output` (override `--train-data-dir` or pass `--skip-train-copy` to disable mirroring).
+- 3️⃣ Train the pseudo color regressor (HSV-only target mode): `python -m StenUNet.pseudo_color.train_scalar_field --train-mask-dir StenUNet/pseudo_color/train_data/masks_train --train-target-dir StenUNet/pseudo_color/train_data/targets_train --include-distance --include-coords --device cuda:0 --output-dir StenUNet/pseudo_color/runs`.
+- 4️⃣ Run inference to produce HSV maps and optional RGB overlays; export to StenUNet raw format by adding `--stenunet-images-dir StenUNet/nnNet_training/Raw_data/Dataset_Train_val/imagesTr --stenunet-channel-index 2`: `python -m StenUNet.pseudo_color.infer_scalar_field --mask-dir StenUNet/pseudo_color/train_data/masks_val --checkpoint StenUNet/pseudo_color/runs/best_model.pt --output-dir StenUNet/pseudo_color/runs --save-color`.
+
+
 ## Coding Style & Naming Conventions
 Follow PEP 8 with 4-space indentation for Python, keep type hints on public functions, and prefer descriptive lowercase module names (`centerline_pipeline/distance.py`). Preserve the current logging-first structure in CLI scripts and favor pure functions over side effects. MATLAB contributions should mirror the existing camel-cased function files and inline documentation style in `centerline/*.m`. Before opening a PR, run an auto-formatter such as `black` (line length 100) and `isort` on touched Python files; avoid committing notebook checkpoints or large binaries.
 

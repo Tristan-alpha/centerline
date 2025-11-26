@@ -1,7 +1,8 @@
 {
     "channel_names": {
         "0": "grey",
-        "1": "pre1"
+        "1": "pre1",
+        "2": "hsv_repr"
     },
     "labels": {
         "background": 0,

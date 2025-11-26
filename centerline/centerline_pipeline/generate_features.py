@@ -2,15 +2,39 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 from pathlib import Path
 
 import imageio.v2 as imageio
 import numpy as np
-from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.colors import LinearSegmentedColormap, rgb_to_hsv
 from scipy.ndimage import distance_transform_edt
 
 DEFAULT_MASK_DIR = Path("annotation/labelsTr")
 DEFAULT_OUTPUT_DIR = Path("centerline/output")
+DEFAULT_TRAIN_DATA_DIR = Path("StenUNet/pseudo_color/train_data")
+
+
+def copy_to_train_data(mask_path: Path, hsv_map_path: Path, train_data_dir: Path) -> None:
+    """Copy mask/HSV targets into the pseudo_color training folder."""
+
+    if not hsv_map_path.exists():
+        print(f"[WARN] HSV feature map not found at {hsv_map_path}; skipping copy.")
+        return
+
+    mask_dest_dir = train_data_dir / "masks_train"
+    target_dest_dir = train_data_dir / "targets_train"
+    mask_dest_dir.mkdir(parents=True, exist_ok=True)
+    target_dest_dir.mkdir(parents=True, exist_ok=True)
+
+    case_stem = mask_path.stem
+    mask_dest = mask_dest_dir / mask_path.name
+    target_dest = target_dest_dir / f"{case_stem}.png"
+
+    shutil.copy2(mask_path, mask_dest)
+    shutil.copy2(hsv_map_path, target_dest)
+
+    print(f"[INFO] Copied mask and HSV map for {case_stem} into {train_data_dir}")
 
 _STENOSIS_COLORMAP = LinearSegmentedColormap.from_list(
     "stenosis_rdylbu",
@@ -137,8 +161,12 @@ def get_max_radius(mask_path: Path, centerline_path: Path) -> float:
 
 
 def create_feature_maps(
-    mask_path: Path, centerline_path: Path, output_dir: Path, global_max_radius: float
-) -> None:
+    mask_path: Path,
+    centerline_path: Path,
+    output_dir: Path,
+    global_max_radius: float,
+    train_data_dir: Path | None,
+) -> Path | None:
     """Generate three feature maps for a single case and save them to disk."""
     mask = load_mask(mask_path)
 
@@ -234,9 +262,21 @@ def create_feature_maps(
     # Cast to uint8 for saving
     pseudo_color = glowing_tube.astype(np.uint8)
 
-    imageio.imwrite(figure_dir / "feature_pseudo_color.png", pseudo_color)
+    hsv_float = rgb_to_hsv(np.clip(pseudo_color.astype(np.float32) / 255.0, 0.0, 1.0))
+    hsv_vis = (hsv_float * 255.0).astype(np.uint8)
+
+    np.save(data_dir / "feature_hsv_map.npy", hsv_float.astype(np.float32))
+
+    pseudo_color_path = figure_dir / "feature_pseudo_color.png"
+    hsv_path = figure_dir / "feature_hsv_map.png"
+    imageio.imwrite(pseudo_color_path, pseudo_color)
+    imageio.imwrite(hsv_path, hsv_vis)
+
+    if train_data_dir is not None:
+        copy_to_train_data(mask_path, hsv_path, train_data_dir)
 
     print(f"[INFO] Saved feature maps for {centerline_path.parent.name} -> {output_dir}")
+    return hsv_path
 
 
 def resolve_mask_path(mask_dir: Path, centerline_json: Path) -> Path | None:
@@ -258,7 +298,7 @@ def resolve_mask_path(mask_dir: Path, centerline_json: Path) -> Path | None:
     return None
 
 
-def process_all_cases(mask_dir: Path, output_dir: Path) -> None:
+def process_all_cases(mask_dir: Path, output_dir: Path, train_data_dir: Path | None) -> None:
     """Generate feature maps for every case under output_dir."""
     json_paths = sorted(output_dir.glob("*/centerline.json"))
     if not json_paths:
@@ -283,7 +323,13 @@ def process_all_cases(mask_dir: Path, output_dir: Path) -> None:
         if mask_path is None:
             print(f"[WARN] Mask not found for {centerline_json}. Skipping feature generation.")
             continue
-        create_feature_maps(mask_path, centerline_json, centerline_json.parent, global_max_radius)
+        create_feature_maps(
+            mask_path,
+            centerline_json,
+            centerline_json.parent,
+            global_max_radius,
+            train_data_dir,
+        )
 
 
 def main() -> None:
@@ -306,10 +352,27 @@ def main() -> None:
         default=None,
         help="Optional case identifier (directory name) to process a single case.",
     )
+    parser.add_argument(
+        "--train-data-dir",
+        type=Path,
+        default=DEFAULT_TRAIN_DATA_DIR,
+        help=(
+            "Directory where masks/HSV targets are mirrored for pseudo_color training. "
+            "Set to '' to disable copying."
+        ),
+    )
+    parser.add_argument(
+        "--skip-train-copy",
+        action="store_true",
+        help="Disable copying generated HSV maps into the pseudo_color training folder.",
+    )
     args = parser.parse_args()
 
     mask_dir = args.mask_dir
     output_dir = args.output_dir
+    train_data_dir = None
+    if not args.skip_train_copy and str(args.train_data_dir):
+        train_data_dir = args.train_data_dir
 
     if args.case_id:
         case_stem = Path(args.case_id).stem
@@ -323,9 +386,15 @@ def main() -> None:
             return
         # For a single case, the global max is just the case's max
         max_radius = get_max_radius(mask_path, centerline_json)
-        create_feature_maps(mask_path, centerline_json, centerline_json.parent, max_radius)
+        create_feature_maps(
+            mask_path,
+            centerline_json,
+            centerline_json.parent,
+            max_radius,
+            train_data_dir,
+        )
     else:
-        process_all_cases(mask_dir, output_dir)
+        process_all_cases(mask_dir, output_dir, train_data_dir)
 
 
 if __name__ == "__main__":
