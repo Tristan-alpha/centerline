@@ -195,19 +195,6 @@ def create_feature_maps(
     # Normalize radius map with global max radius
     normalized_radius_map = radius_map / global_max_radius if global_max_radius > 0 else radius_map
 
-    data_dir = output_dir / "data"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    np.save(data_dir / "feature_normalized_distance.npy", normalized_distance)
-    np.save(data_dir / "feature_radius.npy", normalized_radius_map)
-
-    dist_vis = normalize_for_visualization(normalized_distance, vessel_mask)
-    radius_vis = normalize_for_visualization(normalized_radius_map, vessel_mask)
-
-    figure_dir = output_dir / "figures"
-    figure_dir.mkdir(parents=True, exist_ok=True)
-    imageio.imwrite(figure_dir / "feature_dist_transform.png", dist_vis)
-    imageio.imwrite(figure_dir / "feature_radius_map.png", radius_vis)
-
     # Create a "Glowing Tube" visualization:
     # 1. Hue/Color is determined by the radius (Red=Narrow, Blue=Wide)
     # 2. Brightness/Intensity is determined by the distance to centerline (Center=Bright, Wall=Dark)
@@ -234,6 +221,19 @@ def create_feature_maps(
     # Cast to uint8 for saving
     pseudo_color = glowing_tube.astype(np.uint8)
 
+    data_dir = output_dir / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    np.save(data_dir / "feature_normalized_distance.npy", normalized_distance)
+    np.save(data_dir / "feature_radius.npy", normalized_radius_map)
+    np.save(data_dir / "feature_pseudo_color.npy", pseudo_color)
+
+    dist_vis = normalize_for_visualization(normalized_distance, vessel_mask)
+    radius_vis = normalize_for_visualization(normalized_radius_map, vessel_mask)
+
+    figure_dir = output_dir / "figures"
+    figure_dir.mkdir(parents=True, exist_ok=True)
+    imageio.imwrite(figure_dir / "feature_dist_transform.png", dist_vis)
+    imageio.imwrite(figure_dir / "feature_radius_map.png", radius_vis)
     imageio.imwrite(figure_dir / "feature_pseudo_color.png", pseudo_color)
 
     print(f"[INFO] Saved feature maps for {centerline_path.parent.name} -> {output_dir}")
