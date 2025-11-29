@@ -1,4 +1,4 @@
-"""Train a residual U-Net to regress pseudo color fields from masks."""
+"""Train a residual U-Net to regress pseudo color fields from generated features."""
 
 from __future__ import annotations
 
@@ -6,8 +6,9 @@ import argparse
 import json
 import random
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Sequence, Tuple
 
+import imageio.v2 as imageio
 import numpy as np
 import torch
 from torch import Tensor
@@ -18,8 +19,7 @@ from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from .colormap import apply_colormap
-from .dataset import PseudoColorDataset, collate_samples
+from .dataset import PseudoColorFeatureDataset, collate_samples, list_cases
 from .losses import ScalarFieldLoss
 from .model import ResUNet
 
@@ -57,69 +57,59 @@ def compute_mask_mae(prediction: Tensor, target: Tensor, mask: Tensor) -> float:
     return float(error.sum().item() / denom.item())
 
 
-def build_dataloader(
-    mask_dir: str | Path,
-    target_dir: str | Path,
-    target_mode: str,
-    include_distance: bool,
-    include_coords: bool,
-    batch_size: int,
-    shuffle: bool,
-    num_workers: int,
-) -> DataLoader:
-    dataset = PseudoColorDataset(
-        mask_dir=mask_dir,
-        target_dir=target_dir,
-        target_mode=target_mode,
-        include_distance=include_distance,
-        include_coords=include_coords,
-    )
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=num_workers,
-        pin_memory=True,
-        collate_fn=collate_samples,
-    )
+def _split_cases(cases: Sequence[Path], val_ratio: float, seed: int) -> Tuple[List[Path], List[Path]]:
+    if not 0.0 < val_ratio < 1.0:
+        raise ValueError("val_ratio must be between 0 and 1.")
+    rng = np.random.default_rng(seed)
+    indices = np.arange(len(cases))
+    rng.shuffle(indices)
+    split = int(len(cases) * (1.0 - val_ratio))
+    split = min(max(split, 1), len(cases) - 1) if len(cases) > 1 else 1
+    train_idx = indices[:split]
+    val_idx = indices[split:] if len(cases) > 1 else indices[:0]
+    train_cases = [cases[i] for i in sorted(train_idx)]
+    val_cases = [cases[i] for i in sorted(val_idx)]
+    return train_cases, val_cases
 
 
 def train(args: argparse.Namespace) -> None:
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
     set_seed(args.seed)
 
-    target_mode = args.target_mode.lower()
-    if target_mode not in {"scalar", "rgb"}:
-        raise ValueError("target_mode must be 'scalar' or 'rgb'.")
+    all_cases = list_cases(args.data_root)
+    train_cases, val_cases = _split_cases(all_cases, args.val_ratio, args.seed)
 
-    train_loader = build_dataloader(
-        args.train_mask_dir,
-        args.train_target_dir,
-        target_mode,
-        args.include_distance,
-        args.include_coords,
-        args.batch_size,
+    train_dataset = PseudoColorFeatureDataset(
+        args.data_root, mask_root=args.mask_dir, file_list=[c.name for c in train_cases]
+    )
+    val_dataset = PseudoColorFeatureDataset(
+        args.data_root, mask_root=args.mask_dir, file_list=[c.name for c in val_cases]
+    )
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
+        pin_memory=True,
+        collate_fn=collate_samples,
     )
 
     val_loader: Optional[DataLoader]
-    if args.val_mask_dir and args.val_target_dir:
-        val_loader = build_dataloader(
-            args.val_mask_dir,
-            args.val_target_dir,
-            target_mode,
-            args.include_distance,
-            args.include_coords,
-            args.batch_size,
+    if len(val_cases) > 0:
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=args.batch_size,
             shuffle=False,
             num_workers=args.num_workers,
+            pin_memory=True,
+            collate_fn=collate_samples,
         )
     else:
         val_loader = None
 
-    in_channels = 1 + int(args.include_distance) + (2 if args.include_coords else 0)
-    out_channels = 3 if target_mode == "rgb" else 1
+    in_channels = 1  # binary mask only
+    out_channels = 3  # glowing tube pseudo color (RGB) in 0-1 range
     model = ResUNet(
         in_channels=in_channels,
         out_channels=out_channels,
@@ -191,10 +181,10 @@ def train(args: argparse.Namespace) -> None:
                         target = batch["target"].to(device, non_blocking=True)
                         mask = batch["mask"].to(device, non_blocking=True)
                         prediction = model(inputs)
-                    prediction = apply_vessel_mask(prediction, mask)
-                    loss = loss_fn(prediction, target, mask)
-                    val_loss += loss.item()
-                    mae_total += compute_mask_mae(prediction, target, mask)
+                        prediction = apply_vessel_mask(prediction, mask)
+                        loss = loss_fn(prediction, target, mask)
+                        val_loss += loss.item()
+                        mae_total += compute_mask_mae(prediction, target, mask)
             val_loss /= max(len(val_loader), 1)
             mae_total /= max(len(val_loader), 1)
             metrics["val_loss"] = val_loss
@@ -213,7 +203,7 @@ def train(args: argparse.Namespace) -> None:
                 )
 
             if args.export_preview:
-                preview_dir = output_dir / "val_preview"
+                preview_dir = output_dir / "train_png"
                 preview_dir.mkdir(exist_ok=True)
                 preview_batch = next(iter(val_loader))
                 preview_inputs = preview_batch["inputs"].to(device)
@@ -221,20 +211,12 @@ def train(args: argparse.Namespace) -> None:
                     preview_prediction = model(preview_inputs).cpu()
                 preview_mask = preview_batch["mask"]
                 masked_prediction = apply_vessel_mask(preview_prediction, preview_mask)
-                if target_mode == "rgb":
-                    pseudo_color = masked_prediction.clamp(0.0, 1.0)
-                else:
-                    pseudo_color = apply_colormap(masked_prediction)
                 for idx, meta in enumerate(preview_batch["meta"]):
-                    stem = meta.get("stem", f"sample_{idx}")
-                    path = preview_dir / f"{stem}.pt"
-                    torch.save(
-                        {
-                            "prediction": masked_prediction[idx],
-                            "pseudo_color": pseudo_color[idx],
-                            "target": preview_batch["target"][idx],
-                        },
-                        path,
+                    stem = meta.get("case", f"sample_{idx}")
+                    tensor = masked_prediction[idx].clamp(0.0, 1.0) * 255.0
+                    imageio.imwrite(
+                        preview_dir / f"{stem}.png",
+                        tensor.permute(1, 2, 0).numpy().astype(np.uint8),
                     )
 
         torch.save(
@@ -258,24 +240,9 @@ def train(args: argparse.Namespace) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train pseudo-color regression baseline.")
-    parser.add_argument("--train-mask-dir", type=str, default="StenUNet/pseudo_color/train_data/masks_train", help="Directory with binary mask PNG/NPY files.")
-    parser.add_argument(
-        "--train-target-dir",
-        type=str,
-        default="StenUNet/pseudo_color/train_data/targets_train",
-        help="Directory with scalar or RGB pseudo color supervision.",
-    )
-    parser.add_argument("--val-mask-dir", type=str, default="StenUNet/pseudo_color/train_data/masks_val", help="Optional validation mask directory.")
-    parser.add_argument("--val-target-dir", type=str, default="StenUNet/pseudo_color/train_data/targets_val", help="Optional validation target directory.")
-    parser.add_argument(
-        "--target-mode",
-        type=str,
-        default="rgb",
-        choices=["scalar", "rgb"],
-        help="Supervision mode (scalar or full RGB pseudo color).",
-    )
-    parser.add_argument("--include-distance", action="store_true", help="Append signed distance channel to the input.")
-    parser.add_argument("--include-coords", action="store_true", help="Append coordinate channels to the input.")
+    parser.add_argument("--data-root", type=str, default="centerline/output", help="Root directory containing case folders with feature_* npy files.")
+    parser.add_argument("--mask-dir", type=str, default="annotation/labelsTr", help="Directory containing binary masks aligned to cases.")
+    parser.add_argument("--val-ratio", type=float, default=0.2, help="Validation split ratio.")
     parser.add_argument("--batch-size", type=int, default=4, help="Training batch size.")
     parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs.")
     parser.add_argument("--lr", type=float, default=3e-4, help="Peak learning rate for OneCycleLR.")
@@ -284,8 +251,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--grad-weight", type=float, default=0.1, help="Weight for gradient matching loss.")
     parser.add_argument("--eikonal-weight", type=float, default=0.0, help="Weight for the eikonal regularizer.")
     parser.add_argument("--eikonal-target", type=float, default=1.0, help="Target gradient magnitude for eikonal loss.")
-    parser.add_argument("--outside-weight", type=float, default=0.1, help="Relative weight for outside-mask loss.")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed.")
+    parser.add_argument("--outside-weight", type=float, default=0.0, help="Relative weight for outside-mask loss (0 to ignore background).")
+    parser.add_argument("--seed", type=int, default=0, help="Random seed.")
     parser.add_argument("--num-workers", type=int, default=4, help="Number of dataloader workers.")
     parser.add_argument("--device", type=str, default="", help="Torch device string, e.g. cuda:0 or cpu.")
     parser.add_argument("--base-channels", type=int, default=32, help="Base channel count for the ResUNet.")

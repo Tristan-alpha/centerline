@@ -218,14 +218,14 @@ def create_feature_maps(
     # Ensure background is strictly black (masking)
     glowing_tube[~vessel_mask] = 0
     
-    # Cast to uint8 for saving
-    pseudo_color = glowing_tube.astype(np.uint8)
+    # Normalize to 0-1 float for downstream training
+    pseudo_color_float = glowing_tube / 255.0
 
     data_dir = output_dir / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     np.save(data_dir / "feature_normalized_distance.npy", normalized_distance)
     np.save(data_dir / "feature_radius.npy", normalized_radius_map)
-    np.save(data_dir / "feature_pseudo_color.npy", pseudo_color)
+    np.save(data_dir / "feature_pseudo_color.npy", pseudo_color_float.astype(np.float32))
 
     dist_vis = normalize_for_visualization(normalized_distance, vessel_mask)
     radius_vis = normalize_for_visualization(normalized_radius_map, vessel_mask)
@@ -234,7 +234,8 @@ def create_feature_maps(
     figure_dir.mkdir(parents=True, exist_ok=True)
     imageio.imwrite(figure_dir / "feature_dist_transform.png", dist_vis)
     imageio.imwrite(figure_dir / "feature_radius_map.png", radius_vis)
-    imageio.imwrite(figure_dir / "feature_pseudo_color.png", pseudo_color)
+    pseudo_color_png = (pseudo_color_float * 255.0).astype(np.uint8)
+    imageio.imwrite(figure_dir / "feature_pseudo_color.png", pseudo_color_png)
 
     print(f"[INFO] Saved feature maps for {centerline_path.parent.name} -> {output_dir}")
 

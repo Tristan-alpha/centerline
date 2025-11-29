@@ -4,71 +4,34 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import List
 
 import imageio.v2 as imageio
 import numpy as np
 import torch
 from tqdm import tqdm
 
-from .colormap import apply_colormap
-from .dataset import SUPPORTED_EXTS, binarize_mask, load_image, prepare_input_channels
+from .dataset import list_cases
 from .model import ResUNet
 
 
-def list_mask_files(mask_dir: Path) -> List[Path]:
-    files = [
-        path
-        for path in mask_dir.iterdir()
-        if path.is_file() and path.suffix.lower() in SUPPORTED_EXTS
-    ]
-    if not files:
-        raise ValueError(f"No supported mask files were found in {mask_dir}.")
-    return sorted(files)
+def _load_mask(mask_root: Path, case_name: str) -> np.ndarray:
+    mask_path = mask_root / f"{case_name}.png"
+    if not mask_path.exists():
+        mask_path = mask_root / f"{case_name}.npy"
+    if not mask_path.exists():
+        raise FileNotFoundError(f"Mask not found for case {case_name} in {mask_root}.")
+    if mask_path.suffix.lower() == ".npy":
+        mask_arr = np.load(mask_path)
+    else:
+        mask_arr = imageio.imread(mask_path)
+    return (mask_arr > 0).astype(np.float32)
 
 
-def save_field(array: np.ndarray, path: Path, fmt: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    array = array.astype(np.float32)
-    if fmt == "npy":
-        np.save(path, array)
-        return
-    if fmt == "pt":
-        torch.save(torch.from_numpy(array), path)
-        return
-    if fmt == "png":
-        clipped = np.clip(array, 0.0, 1.0)
-        if clipped.ndim == 2:
-            scaled = (clipped * 255.0).astype(np.uint8)
-        elif clipped.ndim == 3 and clipped.shape[2] == 3:
-            scaled = (clipped * 255.0).astype(np.uint8)
-            # imageio expects RGB, no conversion needed
-        else:
-            raise ValueError("PNG export expects either HxW or HxWx3 arrays.")
-        imageio.imwrite(str(path), scaled)
-        return
-    raise ValueError(f"Unsupported format {fmt}.")
-
-
-def save_color_map(tensor: torch.Tensor, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    array = tensor.permute(1, 2, 0).cpu().numpy()
-    array = np.clip(array, 0.0, 1.0)
-    # imageio expects RGB, no conversion needed
-    rgb = (array * 255.0).astype(np.uint8)
-    imageio.imwrite(str(path), rgb)
-
-
-def _infer_channel_flags(total_in_channels: int) -> Tuple[bool, bool]:
-    combos: Dict[int, Tuple[bool, bool]] = {
-        1: (False, False),
-        2: (True, False),
-        3: (False, True),
-        4: (True, True),
-    }
-    if total_in_channels not in combos:
-        raise ValueError(f"Unsupported input channel count {total_in_channels} in checkpoint.")
-    return combos[total_in_channels]
+def _apply_vessel_mask(tensor: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    if mask.shape[1] == 1 and tensor.shape[1] > 1:
+        mask = mask.expand(-1, tensor.shape[1], *mask.shape[2:])
+    return tensor * mask
 
 
 def run_inference(args: argparse.Namespace) -> None:
@@ -83,7 +46,6 @@ def run_inference(args: argparse.Namespace) -> None:
     trained_in_channels = stem_weight.shape[1]
     out_channels = head_weight.shape[0]
 
-    include_distance, include_coords = _infer_channel_flags(trained_in_channels)
     ckpt_args = checkpoint.get("args", {})
     base_channels = ckpt_args.get("base_channels", args.base_channels)
     num_stages = ckpt_args.get("num_stages", args.num_stages)
@@ -99,57 +61,43 @@ def run_inference(args: argparse.Namespace) -> None:
     model.load_state_dict(state_dict)
     model.eval()
 
-    mask_dir = Path(args.mask_dir)
+    data_root = Path(args.data_root)
+    mask_root = Path(args.mask_dir)
     output_dir = Path(args.output_dir)
-    scalar_dir = output_dir / "scalar"
-    color_dir = output_dir / "pseudo_color"
+    npy_root = output_dir / "inferences"
+    png_root = output_dir / "inference_png"
 
-    mask_files = list_mask_files(mask_dir)
-    for path in tqdm(mask_files, desc="Inferring", unit="image"):
-        array = load_image(path)
-        mask = binarize_mask(array)
-        inputs = prepare_input_channels(mask, include_distance, include_coords)
+    case_dirs = list_cases(data_root)
+    for case_dir in tqdm(case_dirs, desc="Inferring", unit="case"):
+        mask = _load_mask(mask_root, case_dir.name)
+        inputs = mask[None, ...].astype(np.float32)
         inputs_tensor = torch.from_numpy(inputs)[None, ...].to(device)
         mask_tensor = torch.from_numpy(mask[None, None, ...]).to(device=device, dtype=inputs_tensor.dtype)
 
         with torch.no_grad():
             prediction = model(inputs_tensor)
-            if args.sigmoid:
-                prediction = prediction.sigmoid()
-            prediction = prediction * mask_tensor
+            prediction = _apply_vessel_mask(prediction, mask_tensor)
         prediction_cpu = prediction.squeeze(0).detach().cpu()
-        stem = path.stem
-        if out_channels == 1:
-            scalar = prediction_cpu.numpy()[0]
-            scalar_path = scalar_dir / f"{stem}.{args.output_format}"
-            save_field(scalar, scalar_path, args.output_format)
-            if args.save_color:
-                color = apply_colormap(prediction_cpu.unsqueeze(0)).squeeze(0)
-                save_color_map(color, color_dir / f"{stem}.png")
-        elif out_channels == 3:
-            rgb = prediction_cpu.clamp(0.0, 1.0).permute(1, 2, 0).numpy()
-            rgb_path = scalar_dir / f"{stem}.{args.output_format}"
-            save_field(rgb, rgb_path, args.output_format)
-            if args.save_color or args.output_format != "png":
-                save_field(rgb, color_dir / f"{stem}.png", "png")
-        else:
-            raise ValueError(f"Unsupported number of output channels: {out_channels}")
+
+        rgb_float = prediction_cpu.clamp(0.0, 1.0).permute(1, 2, 0).numpy().astype(np.float32)
+
+        npy_path = npy_root / case_dir.name / "data" / "predicted_pseudo_color.npy"
+        npy_path.parent.mkdir(parents=True, exist_ok=True)
+        np.save(npy_path, rgb_float)
+
+        if args.save_png:
+            png_path = png_root / f"{case_dir.name}.png"
+            png_path.parent.mkdir(parents=True, exist_ok=True)
+            imageio.imwrite(png_path, (rgb_float * 255.0).astype(np.uint8))
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Infer pseudo color scalar fields from binary masks.")
-    parser.add_argument("--mask-dir", required=True, type=str, help="Directory with binary mask files.")
+    parser.add_argument("--data-root", required=True, type=str, help="Root directory containing case folders with feature_* npy files.")
+    parser.add_argument("--mask-dir", type=str, default="annotation/labelsTr", help="Directory containing binary masks aligned to cases.")
     parser.add_argument("--checkpoint", required=True, type=str, help="Path to trained model checkpoint.")
-    parser.add_argument("--output-dir", type=str, default="./StenUNet/pseudo_color/runs", help="Directory to save outputs.")
-    parser.add_argument(
-        "--output-format",
-        type=str,
-        default="npy",
-        choices=["npy", "pt", "png"],
-        help="Export format for raw network predictions.",
-    )
-    parser.add_argument("--save-color", action="store_true", help="Export pseudo color PNG overlays (scalar mode) or RGB predictions (RGB mode).")
-    parser.add_argument("--sigmoid", action="store_true", help="Apply sigmoid to prediction before saving.")
+    parser.add_argument("--output-dir", type=str, default="./StenUNet/pseudo_color/runs", help="Directory to save outputs (npy + png).")
+    parser.add_argument("--save-png", action="store_true", help="Export pseudo color PNG previews to a separate directory.")
     parser.add_argument("--device", type=str, default="", help="PyTorch device string.")
     parser.add_argument("--base-channels", type=int, default=32, help="Base channel count (must match training).")
     parser.add_argument("--num-stages", type=int, default=4, help="Number of encoder/decoder stages (match training).")
