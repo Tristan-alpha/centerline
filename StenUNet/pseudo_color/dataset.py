@@ -13,15 +13,29 @@ REQUIRED_TARGET = "feature_pseudo_color.npy"
 
 
 def list_cases(data_root: str | Path) -> List[Path]:
-    """List cases that contain the required target file."""
+    """List cases that contain the required target file or are flat mask files."""
     root = Path(data_root)
     cases: List[Path] = []
+
+    # 1. Look for structured cases (directories with data/feature_pseudo_color.npy)
     for case_dir in sorted(p for p in root.iterdir() if p.is_dir()):
         data_dir = case_dir / "data"
         if (data_dir / REQUIRED_TARGET).exists():
             cases.append(case_dir)
+
+    # 2. If no structured cases, look for flat mask files (inference mode)
     if not cases:
-        raise ValueError(f"No valid cases found under {root}. Expected {REQUIRED_TARGET}.")
+        stems = set()
+        for file_path in sorted(root.iterdir()):
+            if file_path.is_file() and file_path.suffix.lower() in (".png", ".npy"):
+                stems.add(file_path.stem)
+        for stem in sorted(stems):
+            cases.append(root / stem)
+
+    if not cases:
+        raise ValueError(
+            f"No valid cases found under {root}. Expected subdirs with {REQUIRED_TARGET} or flat mask files (.png/.npy)."
+        )
     return cases
 
 

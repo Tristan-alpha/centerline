@@ -20,11 +20,26 @@ if __name__ == "__main__":
     parser.add_argument('-p', type=str, required=False, default='./dataset_test/post_prediction/', help = 'Folder in which the post predictions are')
     
     parser.add_argument('-t', type=int, required=False, default=600, help = 'Threshold to remove small segments')
+    parser.add_argument('--use-pseudo-color-map', action='store_true', help='Append predicted pseudo color channels during inference.')
+    parser.add_argument('--pseudo-color-dir', type=str, default='StenUNet/pseudo_color/runs/inferences',
+                        help='Root directory of predicted pseudo color outputs.')
+    parser.add_argument('--no-pseudo-color-normalize', action='store_false', dest='pseudo_color_normalize',
+                        help='Disable normalization of pseudo color channels before concatenation.')
+    parser.set_defaults(pseudo_color_normalize=True)
  
     
     args = parser.parse_args()
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    if args.use_pseudo_color_map:
+        os.environ["STENUNET_USE_PSEUDO_COLOR_MAP"] = "1"
+        os.environ["STENUNET_PSEUDO_COLOR_DIR"] = args.pseudo_color_dir
+        os.environ["STENUNET_PSEUDO_COLOR_NORMALIZE"] = "1" if args.pseudo_color_normalize else "0"
+    else:
+        os.environ.pop("STENUNET_USE_PSEUDO_COLOR_MAP", None)
+        os.environ.pop("STENUNET_PSEUDO_COLOR_DIR", None)
+        os.environ.pop("STENUNET_PSEUDO_COLOR_NORMALIZE", None)
 
     print('--------------preprocessing--------------')
 
