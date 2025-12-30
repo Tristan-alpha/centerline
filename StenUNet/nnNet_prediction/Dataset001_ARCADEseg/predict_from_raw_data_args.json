@@ -1,0 +1,11 @@
+{
+    "folder_with_segs_from_prev_stage": null,
+    "list_of_lists_or_source_folder": "/home/data/nas_hdd/dazhou/centerline/StenUNet/nnNet_training/Raw_data/Dataset001_ARCADEseg/imagesTs",
+    "num_parts": 1,
+    "num_processes_preprocessing": 3,
+    "num_processes_segmentation_export": 3,
+    "output_folder_or_list_of_truncated_output_files": "/home/data/nas_hdd/dazhou/centerline/StenUNet/nnNet_prediction/Dataset001_ARCADEseg",
+    "overwrite": true,
+    "part_id": 0,
+    "save_probabilities": false
+}
