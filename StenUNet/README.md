@@ -101,32 +101,28 @@ The inference folder structure is like this:
 [nnunet](https://github.com/MIC-DKFZ/nnUNet)
 
 ## Pseudo Color Regression Baseline
-We provide a reference implementation that learns pseudo color scalar fields directly from binary masks without an intermediate centerline step. The code lives under `pseudo_color/` and exposes standalone training and inference entrypoints.
+The `pseudo_color/` baseline now trains directly on generated features from the centerline pipeline:
 
-1. Prepare a dataset with matching binary masks and supervision scalar fields. Masks should be stored as PNG/TIFF/NPY files under `mask_dir`, while scalar-field targets (normalised to `[0, 1]`) should live in `target_dir` with the same filenames. Targets can be generated offline using the legacy centerline pipeline.
-2. Train the residual U-Net baseline (run the command from inside `StenUNet/`):
+1. Generate features (glowing tube HSV-style) via `python -m centerline_pipeline ...` then `python centerline/centerline_pipeline/generate_features.py`. Each case writes `feature_normalized_distance.npy`, `feature_radius.npy`, and `feature_pseudo_color.npy` to `centerline/output/<case>/data/`.
+2. Train from inside `StenUNet/`:
 
          python -m pseudo_color.train_scalar_field \
-             --train-mask-dir /path/to/masks_train \
-             --train-target-dir /path/to/scalar_train \
-             --val-mask-dir /path/to/masks_val \
-             --val-target-dir /path/to/scalar_val \
-             --include-distance --include-coords \
-             --epochs 100 --batch-size 8 \
-             --output-dir ./pseudo_color_runs
+             --data-root centerline/output \
+             --output-dir StenUNet/pseudo_color/runs \
+             --val-ratio 0.2 --seed 0 --amp --export-preview
 
-   Checkpoints `last_model.pt` and `best_model.pt`, metrics, and optional validation previews are written to `output_dir`.
-3. Run inference with the trained checkpoint:
+   Inputs are the distance and radius maps; supervision is `feature_pseudo_color.npy` (RGB, 0–255). Previews are saved to `runs/train_png/`; checkpoints land in `runs/`.
+3. Infer pseudo color:
 
          python -m pseudo_color.infer_scalar_field \
-             --mask-dir /path/to/masks_test \
-             --checkpoint ./pseudo_color_runs/best_model.pt \
-             --include-distance --include-coords \
-             --sigmoid --save-color
+             --data-root centerline/output \
+             --checkpoint StenUNet/pseudo_color/runs/best_model.pt \
+             --output-dir StenUNet/pseudo_color/runs \
+             --save-png
 
-   Scalar field predictions are exported under `pseudo_color_outputs/scalar/` (default `.npy`), and RGB pseudo color overlays are saved to `pseudo_color_outputs/pseudo_color/` when `--save-color` is set.
+   Predictions are written to `runs/inferences/<case>/data/predicted_pseudo_color.npy` and PNG previews to `runs/inference_png/`.
 
-The baseline uses a multi-task loss combining L1, gradient, and optional eikonal regularisation. Adjust the CLI flags (e.g., `--grad-weight`, `--eikonal-weight`) to tune the training objective for your dataset.
+During main StenUNet training or inference, append these predicted pseudo-color channels by setting `--use-pseudo-color-map --pseudo-color-dir StenUNet/pseudo_color/runs/inferences` on the CLI; this injects three extra modalities (R/G/B) on top of the existing inputs.
 
 ## Citation
 Please cite the following paper when using SteUNet:

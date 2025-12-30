@@ -10,6 +10,8 @@ annotation/labelsTr/
 centerline/output/
 centerline/centerline_original/labelsTr/
 output/
+StenUNet/nnNet_training/
+StenUNet/pseudo_color/runs/
 
 # Typical volumetric/image/data files
 *.nii
