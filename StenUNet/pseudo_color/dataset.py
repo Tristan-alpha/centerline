@@ -1,131 +1,101 @@
-"""Dataset utilities for pseudo color regression using raw images."""
+"""Dataset utilities for pseudo color regression."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence
 
-import imageio.v2 as imageio
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 
 REQUIRED_TARGET = "feature_pseudo_color.npy"
-SUPPORTED_EXTS: Tuple[str, ...] = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".npy")
 
 
-def find_image(stem: str, image_root: Path) -> Optional[Path]:
-    exact = []
-    prefixed = []
-    for ext in SUPPORTED_EXTS:
-        path = image_root / f"{stem}{ext}"
-        if path.exists():
-            exact.append(path)
-    if exact:
-        return sorted(exact)[0]
-
-    # fallback: first file whose stem starts with stem + "_"
-    for path in sorted(image_root.iterdir()):
-        if not path.is_file():
-            continue
-        if path.suffix.lower() not in SUPPORTED_EXTS:
-            continue
-        if path.stem.startswith(f"{stem}_"):
-            prefixed.append(path)
-    if prefixed:
-        return prefixed[0]
-    return None
-
-
-def load_image(path: Path) -> np.ndarray:
-    """Load a grayscale image and normalize to [0, 1]."""
-    if path.suffix.lower() == ".npy":
-        arr = np.load(path)
-    else:
-        arr = imageio.imread(path)
-    if arr.ndim == 3:
-        arr = arr[..., 0]
-    arr = arr.astype(np.float32)
-    if arr.max() > 1.0:
-        arr = arr / 255.0
-    return arr
-
-
-def list_cases_with_targets(data_root: str | Path, image_root: str | Path) -> List[str]:
-    """Cases that have targets in data_root and corresponding images in image_root."""
+def list_cases(data_root: str | Path) -> List[Path]:
+    """List cases that contain the required target file or are flat mask files."""
     root = Path(data_root)
-    image_root = Path(image_root)
-    cases: List[str] = []
+    cases: List[Path] = []
+
+    # 1. Look for structured cases (directories with data/feature_pseudo_color.npy)
     for case_dir in sorted(p for p in root.iterdir() if p.is_dir()):
         data_dir = case_dir / "data"
-        if not (data_dir / REQUIRED_TARGET).exists():
-            continue
-        if find_image(case_dir.name, image_root) is not None:
-            cases.append(case_dir.name)
+        if (data_dir / REQUIRED_TARGET).exists():
+            cases.append(case_dir)
+
+    # 2. If no structured cases, look for flat mask files (inference mode)
     if not cases:
-        raise ValueError(f"No valid cases with targets found under {root}.")
+        stems = set()
+        for file_path in sorted(root.iterdir()):
+            if file_path.is_file() and file_path.suffix.lower() in (".png", ".npy"):
+                stems.add(file_path.stem)
+        for stem in sorted(stems):
+            cases.append(root / stem)
+
+    if not cases:
+        raise ValueError(
+            f"No valid cases found under {root}. Expected subdirs with {REQUIRED_TARGET} or flat mask files (.png/.npy)."
+        )
     return cases
 
 
-def list_image_cases(image_root: str | Path) -> List[str]:
-    """List all image stems under image_root."""
-    root = Path(image_root)
-    stems: List[str] = []
-    for path in sorted(root.iterdir()):
-        if path.is_file() and path.suffix.lower() in SUPPORTED_EXTS:
-            stems.append(path.stem)
-    if not stems:
-        raise ValueError(f"No images found under {root}.")
-    return stems
-
-
 class PseudoColorFeatureDataset(Dataset):
-    """Dataset that pairs raw images with pseudo color supervision."""
+    """Dataset that pairs masks with pseudo color supervision."""
 
     def __init__(
         self,
         data_root: str | Path,
-        image_root: str | Path,
+        mask_root: str | Path,
         file_list: Optional[Sequence[str]] = None,
         transform: Optional[Any] = None,
     ) -> None:
         self.data_root = Path(data_root)
-        self.image_root = Path(image_root)
+        self.mask_root = Path(mask_root)
         self.transform = transform
-        all_cases = list_cases_with_targets(self.data_root, self.image_root)
+        all_cases = list_cases(self.data_root)
         if file_list is not None:
-            missing = [stem for stem in file_list if stem not in all_cases]
+            case_lookup = {c.name: c for c in all_cases}
+            missing = [stem for stem in file_list if stem not in case_lookup]
             if missing:
-                raise ValueError(f"Missing cases in targets or images: {missing}")
-            self.cases = list(file_list)
+                raise ValueError(f"Missing cases in {self.data_root}: {missing}")
+            self.cases = [case_lookup[stem] for stem in file_list]
         else:
             self.cases = all_cases
 
     def __len__(self) -> int:
         return len(self.cases)
 
-    def _load_case(self, case_name: str) -> Dict[str, np.ndarray]:
-        data_dir = self.data_root / case_name / "data"
+    def _load_case(self, case_dir: Path) -> Dict[str, np.ndarray]:
+        data_dir = case_dir / "data"
         pseudo_color = np.load(data_dir / REQUIRED_TARGET).astype(np.float32)
-        img_path = find_image(case_name, self.image_root)
-        if img_path is None:
-            raise FileNotFoundError(f"Image not found for case {case_name} in {self.image_root}.")
-        image = load_image(img_path)
+        mask_path = self.mask_root / f"{case_dir.name}.png"
+        if not mask_path.exists():
+            mask_path = self.mask_root / f"{case_dir.name}.npy"
+        if not mask_path.exists():
+            raise FileNotFoundError(f"Mask not found for case {case_dir.name} in {self.mask_root}.")
 
-        inputs = image[None, ...]
+        if mask_path.suffix.lower() == ".npy":
+            mask_arr = np.load(mask_path)
+        else:
+            import imageio.v2 as imageio  # lazy import to avoid dependency at module load
+            mask_arr = imageio.imread(mask_path)
+        mask = (mask_arr > 0).astype(np.float32)
+
+        inputs = mask[None, ...]
         target = pseudo_color.transpose(2, 0, 1)
-        return {"inputs": inputs, "target": target}
+        return {"inputs": inputs, "mask": mask, "target": target}
 
     def __getitem__(self, index: int) -> Dict[str, Any]:
-        case_name = self.cases[index]
-        loaded = self._load_case(case_name)
+        case_dir = self.cases[index]
+        loaded = self._load_case(case_dir)
 
         sample: Dict[str, Any] = {
             "inputs": torch.from_numpy(loaded["inputs"]),
+            "mask": torch.from_numpy(loaded["mask"])[None, ...],
             "target": torch.from_numpy(loaded["target"]),
             "meta": {
-                "case": case_name,
-                "data_dir": str(self.data_root / case_name / "data"),
+                "case": case_dir.name,
+                "data_dir": str(case_dir / "data"),
             },
         }
 
@@ -138,6 +108,7 @@ class PseudoColorFeatureDataset(Dataset):
 def collate_samples(batch: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     """Custom collate_fn that keeps metadata as a list of dictionaries."""
     inputs = torch.stack([item["inputs"] for item in batch])
+    mask = torch.stack([item["mask"] for item in batch])
     target = torch.stack([item["target"] for item in batch])
     meta = [item.get("meta", {}) for item in batch]
-    return {"inputs": inputs, "target": target, "meta": meta}
+    return {"inputs": inputs, "mask": mask, "target": target, "meta": meta}

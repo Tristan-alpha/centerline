@@ -1,5 +1,5 @@
 {
-    "dataset_name": "Dataset_Train_val",
+    "dataset_name": "Dataset001_ARCADEseg",
     "plans_name": "nnUNetPlans",
     "original_median_spacing_after_transp": [
         999.0,
@@ -26,7 +26,7 @@
         "2d": {
             "data_identifier": "nnUNetPlans_2d",
             "preprocessor_name": "DefaultPreprocessor",
-            "batch_size": 2,
+            "batch_size": 12,
             "patch_size": [
                 512,
                 512
@@ -40,107 +40,11 @@
                 1.0
             ],
             "normalization_schemes": [
-                "ZScoreNormalization",
                 "ZScoreNormalization"
             ],
             "use_mask_for_norm": [
-                false,
                 false
             ],
-            "UNet_class_name": "PlainConvUNet",
-            "UNet_base_num_features": 32,
-            "n_conv_per_stage_encoder": [
-                2,
-                2,
-                2,
-                2,
-                2,
-                2,
-                2,
-                2
-            ],
-            "n_conv_per_stage_decoder": [
-                2,
-                2,
-                2,
-                2,
-                2,
-                2,
-                2
-            ],
-            "num_pool_per_axis": [
-                7,
-                7
-            ],
-            "pool_op_kernel_sizes": [
-                [
-                    1,
-                    1
-                ],
-                [
-                    2,
-                    2
-                ],
-                [
-                    2,
-                    2
-                ],
-                [
-                    2,
-                    2
-                ],
-                [
-                    2,
-                    2
-                ],
-                [
-                    2,
-                    2
-                ],
-                [
-                    2,
-                    2
-                ],
-                [
-                    2,
-                    2
-                ]
-            ],
-            "conv_kernel_sizes": [
-                [
-                    3,
-                    3
-                ],
-                [
-                    3,
-                    3
-                ],
-                [
-                    3,
-                    3
-                ],
-                [
-                    3,
-                    3
-                ],
-                [
-                    3,
-                    3
-                ],
-                [
-                    3,
-                    3
-                ],
-                [
-                    3,
-                    3
-                ],
-                [
-                    3,
-                    3
-                ]
-            ],
-            "unet_max_num_features": 512,
             "resampling_fn_data": "resample_data_or_seg_to_shape",
             "resampling_fn_seg": "resample_data_or_seg_to_shape",
             "resampling_fn_data_kwargs": {
@@ -161,6 +65,128 @@
                 "order": 1,
                 "order_z": 0,
                 "force_separate_z": null
+            },
+            "architecture": {
+                "network_class_name": "dynamic_network_architectures.architectures.unet.PlainConvUNet",
+                "arch_kwargs": {
+                    "n_stages": 8,
+                    "features_per_stage": [
+                        32,
+                        64,
+                        128,
+                        256,
+                        512,
+                        512,
+                        512,
+                        512
+                    ],
+                    "conv_op": "torch.nn.modules.conv.Conv2d",
+                    "kernel_sizes": [
+                        [
+                            3,
+                            3
+                        ],
+                        [
+                            3,
+                            3
+                        ],
+                        [
+                            3,
+                            3
+                        ],
+                        [
+                            3,
+                            3
+                        ],
+                        [
+                            3,
+                            3
+                        ],
+                        [
+                            3,
+                            3
+                        ],
+                        [
+                            3,
+                            3
+                        ],
+                        [
+                            3,
+                            3
+                        ]
+                    ],
+                    "strides": [
+                        [
+                            1,
+                            1
+                        ],
+                        [
+                            2,
+                            2
+                        ],
+                        [
+                            2,
+                            2
+                        ],
+                        [
+                            2,
+                            2
+                        ],
+                        [
+                            2,
+                            2
+                        ],
+                        [
+                            2,
+                            2
+                        ],
+                        [
+                            2,
+                            2
+                        ],
+                        [
+                            2,
+                            2
+                        ]
+                    ],
+                    "n_conv_per_stage": [
+                        2,
+                        2,
+                        2,
+                        2,
+                        2,
+                        2,
+                        2,
+                        2
+                    ],
+                    "n_conv_per_stage_decoder": [
+                        2,
+                        2,
+                        2,
+                        2,
+                        2,
+                        2,
+                        2
+                    ],
+                    "conv_bias": true,
+                    "norm_op": "torch.nn.modules.instancenorm.InstanceNorm2d",
+                    "norm_op_kwargs": {
+                        "eps": 1e-05,
+                        "affine": true
+                    },
+                    "dropout_op": null,
+                    "dropout_op_kwargs": null,
+                    "nonlin": "torch.nn.LeakyReLU",
+                    "nonlin_kwargs": {
+                        "inplace": true
+                    }
+                },
+                "_kw_requires_import": [
+                    "conv_op",
+                    "norm_op",
+                    "dropout_op",
+                    "nonlin"
+                ]
             },
             "batch_dice": true
         }
