@@ -88,6 +88,7 @@ class ImageAnnotator:
         if os.path.exists(self.annotation_file):
             with open(self.annotation_file, "r", encoding="utf-8") as f:
                 return json.load(f)
+        print(f"Warning: Annotation file not found at {self.annotation_file}")
         return {}
 
     def save_annotations(self):
@@ -256,7 +257,8 @@ def main():
     # Use absolute path based on this script's location
     script_dir = Path(__file__).resolve().parent
     image_directory = str(script_dir / "labelsTr")
-    annotator = ImageAnnotator(image_directory)
+    annotation_file = str(script_dir / "annotations.json")
+    annotator = ImageAnnotator(image_directory, annotation_file)
     plt.show()
 
 
