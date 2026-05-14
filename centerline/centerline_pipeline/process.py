@@ -188,19 +188,24 @@ def main(argv: list[str] | None = None) -> None:
 
     snap_points = not args.no_snap
     processed = 0
+    failed = 0
     for case in io.iter_cases(args.mask_dir, annotations):
-        process_case(
-            case,
-            output_root=output_root,
-            k=args.k,
-            connectivity=args.connectivity,
-            snap_points=snap_points,
-        )
-        processed += 1
+        try:
+            process_case(
+                case,
+                output_root=output_root,
+                k=args.k,
+                connectivity=args.connectivity,
+                snap_points=snap_points,
+            )
+            processed += 1
+        except Exception as exc:  # pragma: no cover - defensive batch-level guard
+            failed += 1
+            logging.error("[%s] skipped due to processing error: %s", case.case_id, exc)
         if args.limit is not None and processed >= args.limit:
             break
 
-    logging.info("Processed %d cases into %s", processed, output_root)
+    logging.info("Processed %d cases into %s (failed: %d)", processed, output_root, failed)
 
 
 if __name__ == "__main__":
